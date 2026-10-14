@@ -1,0 +1,309 @@
+//@version=6
+indicator("Deriv V10 Analyzer PRO v16.2 CLEAN", shorttitle="V10 v16.2 CLEAN", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+
+// ── INPUTS ──
+grpTrend = "1. Trend"
+emaFastLen = input.int(9, "Fast EMA", group=grpTrend)
+emaSlowLen = input.int(21, "Slow EMA", group=grpTrend)
+emaTrendLen = input.int(200, "Trend EMA", group=grpTrend)
+stFactor = input.float(3.0, "Supertrend Factor", group=grpTrend)
+stPeriod = input.int(10, "Supertrend Period", group=grpTrend)
+
+grpMom = "2. Momentum"
+rsiLen = input.int(14, "RSI", group=grpMom)
+macdFast = input.int(12, "MACD Fast", group=grpMom)
+macdSlow = input.int(26, "MACD Slow", group=grpMom)
+macdSig = input.int(9, "MACD Sig", group=grpMom)
+adxLen = input.int(14, "ADX", group=grpMom)
+adxMin = input.int(22, "Min ADX", group=grpMom)
+
+grpFilter = "3. Filters"
+minScore = input.int(5, "Min Score/6", minval=1, maxval=6, group=grpFilter)
+useHTF = input.bool(true, "HTF Bias", group=grpFilter)
+htfTf = input.timeframe("60", "HTF", group=grpFilter)
+cooldown = input.int(12, "Cooldown", group=grpFilter)
+
+grpClean = "4. CLEAN MODE - Fix Choking"
+cleanMode = input.bool(true, "CLEAN MODE (Minimal Chart)", group=grpClean, tooltip="ON = only BUY/SELL + 2 OB + BOS/CHOCH. No FVG spam, no LIQ SWEEP spam")
+showCHOCH = input.bool(true, "Show BOS / CHOCH", group=grpClean)
+showOB = input.bool(true, "Show Order Blocks (2 max)", group=grpClean)
+showFVG = input.bool(false, "Show FVG Boxes (clutter)", group=grpClean)
+showFVGLabels = input.bool(false, "Show FVG Text Labels (very clutter)", group=grpClean)
+showRevLabels = input.bool(false, "Show LIQ SWEEP Big Labels (very clutter)", group=grpClean)
+showEq = input.bool(false, "Show Equal Highs/Lows", group=grpClean)
+showHHLL = input.bool(false, "Show HH/HL", group=grpClean)
+
+grpRisk = "5. Risk"
+atrLen = input.int(14, "ATR", group=grpRisk)
+slAtrMul = input.float(1.5, "SL ATR", group=grpRisk)
+swingLen = input.int(8, "Swing lookback", group=grpRisk)
+tpMode = input.string("EMA Dynamic Trailing", "TP Mode", options=["Fixed R:R", "EMA at Entry (Static)", "EMA Dynamic Trailing", "Structure Target", "Chandelier Trailing"], group=grpRisk)
+emaTPSource = input.string("Slow Cross EMA", "EMA Source", options=["Fast Cross EMA", "Slow Cross EMA", "200 EMA"], group=grpRisk)
+rr1 = input.float(1.5, "TP1 R:R", group=grpRisk)
+rr2 = input.float(3.0, "TP2 R:R", group=grpRisk)
+useBE = input.bool(true, "BE after TP1", group=grpRisk)
+
+grpCross = "6. EMA Cross"
+useCross = input.bool(true, "Enable Cross", group=grpCross)
+emaCrossFastLen = input.int(12, "Cross Fast", group=grpCross)
+emaCrossSlowLen = input.int(26, "Cross Slow", group=grpCross)
+crossFilterTrend = input.bool(true, "Filter by 200 EMA", group=grpCross)
+showCrossPlot = input.bool(true, "Show Cross EMAs", group=grpCross)
+useCrossExit = input.bool(true, "Exit on opposite cross", group=grpCross)
+
+// ── CORE ──
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+emaTrend = ta.ema(close, emaTrendLen)
+[_, stDir] = ta.supertrend(stFactor, stPeriod)
+rsi = ta.rsi(close, rsiLen)
+[_,_,macdHist] = ta.macd(close, macdFast, macdSlow, macdSig)
+[diPlus, diMinus, adx] = ta.dmi(adxLen, adxLen)
+atr = ta.atr(atrLen)
+htfBias = request.security(syminfo.tickerid, htfTf, ta.ema(close, 50) > ta.ema(close, 200)?1:-1)
+htfBull = not useHTF or htfBias==1
+htfBear = not useHTF or htfBias==-1
+bullScore = (close>emaTrend?1:0)+(emaFast>emaSlow?1:0)+(stDir<0?1:0)+(rsi>50?1:0)+(macdHist>0?1:0)+(adx>adxMin and diPlus>diMinus?1:0)
+bearScore = (close<emaTrend?1:0)+(emaFast<emaSlow?1:0)+(stDir>0?1:0)+(rsi<50?1:0)+(macdHist<0?1:0)+(adx>adxMin and diMinus>diPlus?1:0)
+
+emaCrossFast = ta.ema(close, emaCrossFastLen)
+emaCrossSlow = ta.ema(close, emaCrossSlowLen)
+crossBullRaw = ta.crossover(emaCrossFast, emaCrossSlow)
+crossBearRaw = ta.crossunder(emaCrossFast, emaCrossSlow)
+getEmaTP() =>
+    switch emaTPSource
+        "Fast Cross EMA" => emaCrossFast
+        "Slow Cross EMA" => emaCrossSlow
+        => emaTrend
+
+// ── STORAGE - REDUCED MAX ──
+var box[] bullOB = array.new_box()
+var box[] bearOB = array.new_box()
+var box[] bullFVG = array.new_box()
+var box[] bearFVG = array.new_box()
+var label[] bosLabs = array.new_label()
+var label[] chochLabs = array.new_label()
+
+structLeft = 10
+structRight = 10
+ph = ta.pivothigh(high, structLeft, structRight)
+pl = ta.pivotlow(low, structLeft, structRight)
+var float lastPH = na
+var float lastPL = na
+var int structTrend = 0
+bool isBullBOS = false
+bool isBearBOS = false
+bool isBullCHOCH = false
+bool isBearCHOCH = false
+bool liqBull = false
+bool liqBear = false
+
+if not na(ph)
+    if not na(lastPH)
+        if ph > lastPH and structTrend >=0
+            isBullBOS := true
+            structTrend := 1
+            if showCHOCH
+                array.push(bosLabs, label.new(bar_index-structRight, ph, "BOS ▲", style=label.style_label_down, color=color.new(color.green, 40), textcolor=color.white, size=size.tiny))
+        if ph > lastPH and structTrend==-1
+            isBullCHOCH := true
+            structTrend := 1
+            if showCHOCH
+                array.push(chochLabs, label.new(bar_index-structRight, ph, "CHOCH • BULL", style=label.style_label_down, color=color.new(color.lime, 0), textcolor=color.black, size=size.small))
+    lastPH:=ph
+if not na(pl)
+    if not na(lastPL)
+        if pl < lastPL and structTrend <=0
+            isBearBOS:=true
+            structTrend:=-1
+            if showCHOCH
+                array.push(bosLabs, label.new(bar_index-structRight, pl, "BOS ▼", style=label.style_label_up, color=color.new(color.red, 40), textcolor=color.white, size=size.tiny))
+        if pl < lastPL and structTrend==1
+            isBearCHOCH:=true
+            structTrend:=-1
+            if showCHOCH
+                array.push(chochLabs, label.new(bar_index-structRight, pl, "CHOCH • BEAR", style=label.style_label_up, color=color.new(color.orange, 0), textcolor=color.black, size=size.small))
+    lastPL:=pl
+
+liqBull := not na(lastPL) and low < lastPL and close > lastPL
+liqBear := not na(lastPH) and high > lastPH and close < lastPH
+
+// FVG - BOX ONLY, NO LABELS BY DEFAULT
+bullFVGCond = low > high[2] and close[1] > open[1]
+bearFVGCond = high < low[2] and close[1] < open[1]
+if showFVG and bullFVGCond
+    b = box.new(bar_index-1, low, bar_index+25, high[2], bgcolor=color.new(color.lime, 88), border_color=color.new(color.lime, 70))
+    array.push(bullFVG, b)
+if showFVG and bearFVGCond
+    b = box.new(bar_index-1, low[2], bar_index+25, high, bgcolor=color.new(color.red, 88), border_color=color.new(color.red, 70))
+    array.push(bearFVG, b)
+
+// OB - 2 MAX, VERY TRANSPARENT
+bool bullImpulse = close > open and (close-open) > atr*0.6
+bool bearImpulse = close < open and (open-close) > atr*0.6
+if showOB and bullImpulse
+    for i=1 to 5
+        if close[i] < open[i]
+            array.push(bullOB, box.new(bar_index-i, high[i], bar_index+25, low[i], bgcolor=color.new(color.lime, 90), border_color=color.new(color.lime, 60)))
+            break
+if showOB and bearImpulse
+    for i=1 to 5
+        if close[i] > open[i]
+            array.push(bearOB, box.new(bar_index-i, high[i], bar_index+25, low[i], bgcolor=color.new(color.red, 90), border_color=color.new(color.red, 60)))
+            break
+
+inBearOB() =>
+    res = false
+    for b in bearOB
+        if close >= box.get_bottom(b) and close <= box.get_top(b)
+            res := true
+            break
+    res
+inBullOB() =>
+    res = false
+    for b in bullOB
+        if close >= box.get_bottom(b) and close <= box.get_top(b)
+            res := true
+            break
+    res
+
+if barstate.isconfirmed
+    if array.size(bullOB) > 0
+        for i = array.size(bullOB)-1 to 0
+            box b = array.get(bullOB, i)
+            if low < box.get_bottom(b) or bar_index - box.get_left(b) > 120
+                box.delete(b)
+                array.remove(bullOB, i)
+            else
+                box.set_right(b, bar_index+25)
+    if array.size(bearOB) > 0
+        for i = array.size(bearOB)-1 to 0
+            box b = array.get(bearOB, i)
+            if high > box.get_top(b) or bar_index - box.get_left(b) > 120
+                box.delete(b)
+                array.remove(bearOB, i)
+            else
+                box.set_right(b, bar_index+25)
+    while array.size(bullOB) > 2
+        box.delete(array.shift(bullOB))
+    while array.size(bearOB) > 2
+        box.delete(array.shift(bearOB))
+    if array.size(bullFVG) > 0
+        for i = array.size(bullFVG)-1 to 0
+            box b = array.get(bullFVG, i)
+            if low < box.get_bottom(b) or bar_index - box.get_left(b) > 80
+                box.delete(b)
+                array.remove(bullFVG, i)
+            else
+                box.set_right(b, bar_index+25)
+    if array.size(bearFVG) > 0
+        for i = array.size(bearFVG)-1 to 0
+            box b = array.get(bearFVG, i)
+            if high > box.get_top(b) or bar_index - box.get_left(b) > 80
+                box.delete(b)
+                array.remove(bearFVG, i)
+            else
+                box.set_right(b, bar_index+25)
+    while array.size(bullFVG) > 2
+        box.delete(array.shift(bullFVG))
+    while array.size(bearFVG) > 2
+        box.delete(array.shift(bearFVG))
+    if array.size(bosLabs) > 0
+        for i = array.size(bosLabs)-1 to 0
+            label l = array.get(bosLabs, i)
+            if bar_index - label.get_x(l) > 50
+                label.delete(l)
+                array.remove(bosLabs, i)
+    if array.size(chochLabs) > 0
+        for i = array.size(chochLabs)-1 to 0
+            label l = array.get(chochLabs, i)
+            if bar_index - label.get_x(l) > 50
+                label.delete(l)
+                array.remove(chochLabs, i)
+    while array.size(bosLabs) > 2
+        label.delete(array.shift(bosLabs))
+    while array.size(chochLabs) > 2
+        label.delete(array.shift(chochLabs))
+
+// Entry
+var bool inTrade = false
+var int dir = 0
+var float entry = na
+var float sl = na
+var float tp1 = na
+var float risk = na
+var int lastClose = na
+var line lnEntry = na
+var line lnSL = na
+var line lnTP1 = na
+var label lbEntry = na
+
+cooldownOK = na(lastClose) or bar_index-lastClose >= cooldown
+canEnter = not inTrade and cooldownOK and barstate.isconfirmed
+emaCrossLongSig = useCross and crossBullRaw and (not crossFilterTrend or close > emaTrend)
+emaCrossShortSig = useCross and crossBearRaw and (not crossFilterTrend or close < emaTrend)
+trigLong = isBullCHOCH or isBullBOS or emaCrossLongSig
+trigShort = isBearCHOCH or isBearBOS or emaCrossShortSig
+longSignal = canEnter and trigLong and bullScore>=minScore and htfBull and not inBearOB()
+shortSignal = canEnter and trigShort and bearScore>=minScore and htfBear and not inBullOB()
+
+if inTrade
+    float emaTPNow = getEmaTP()
+    if tpMode == "EMA Dynamic Trailing"
+        tp1 := emaTPNow
+        line.set_y1(lnTP1, tp1)
+        line.set_y2(lnTP1, tp1)
+    bool hitSL = dir==1? low<=sl : high>=sl
+    bool hitTP = false
+    if tpMode == "Fixed R:R"
+        hitTP := dir==1? high>=tp1 : low<=tp1
+    else
+        hitTP := dir==1? close < emaTPNow - atr*0.2 : close > emaTPNow + atr*0.2
+    bool crossExit = useCrossExit and ((dir==1 and crossBearRaw) or (dir==-1 and crossBullRaw))
+    if hitSL or hitTP or crossExit
+        line.delete(lnEntry)
+        line.delete(lnSL)
+        line.delete(lnTP1)
+        label.delete(lbEntry)
+        inTrade:=false
+        lastClose:=bar_index
+    else
+        line.set_x2(lnEntry, bar_index+25)
+        line.set_x2(lnSL, bar_index+25)
+        line.set_x2(lnTP1, bar_index+25)
+        label.set_x(lbEntry, bar_index+25)
+
+if (longSignal or shortSignal) and not inTrade
+    dir:=longSignal?1:-1
+    entry:=close
+    float rawSL = dir==1? ta.lowest(low, swingLen)-atr*0.2 : ta.highest(high, swingLen)+atr*0.2
+    float dist = math.max(math.abs(entry-rawSL), atr*0.8)
+    sl:=dir==1?entry-dist:entry+dist
+    risk:=dist
+    float emaTPVal = getEmaTP()
+    tp1:= tpMode=="Fixed R:R"? entry+dir*risk*rr1 : emaTPVal
+    inTrade:=true
+    lnEntry:=line.new(bar_index, entry, bar_index+25, entry, color=color.new(color.blue,0), width=2)
+    lnSL:=line.new(bar_index, sl, bar_index+25, sl, color=color.new(color.red,0), style=line.style_dashed)
+    lnTP1:=line.new(bar_index, tp1, bar_index+25, tp1, color=color.new(color.yellow,0), style=line.style_dashed)
+    lbEntry:=label.new(bar_index+25, entry, (dir==1?"▲ BUY ":"▼ SELL ")+str.tostring(close, format.mintick), style=label.style_label_left, color=dir==1?color.blue:color.red, textcolor=color.white, size=size.small)
+
+// ── CLEAN PLOTS ──
+plot(emaTrend, "200 EMA", color.new(color.white, 0), 2)
+plot(showCrossPlot?emaCrossFast:na, "Fast Cross", color.new(color.lime, 0), 2)
+plot(showCrossPlot?emaCrossSlow:na, "Slow Cross", color.new(color.red, 0), 2)
+p1 = plot(showCrossPlot?emaCrossFast:na, "", color.new(color.lime, 100))
+p2 = plot(showCrossPlot?emaCrossSlow:na, "", color.new(color.red, 100))
+fill(p1, p2, color=emaCrossFast>emaCrossSlow?color.new(color.lime, 90):color.new(color.red,90))
+
+// SIGNALS ONLY - NO SPAM
+plotshape(longSignal, "BUY", shape.triangleup, location.belowbar, color.new(color.lime,0), size=size.small, text="BUY")
+plotshape(shortSignal, "SELL", shape.triangledown, location.abovebar, color.new(color.red,0), size=size.small, text="SELL")
+
+// Optional clutter - only if you enable it
+plotshape(showFVGLabels and bullFVGCond, "FVG", shape.labelup, location.belowbar, color.new(color.lime,70), size=size.tiny, text="FVG")
+plotshape(showFVGLabels and bearFVGCond, "FVG", shape.labeldown, location.abovebar, color.new(color.red,70), size=size.tiny, text="FVG")
+plotshape(showRevLabels and liqBull, "LIQ", shape.circle, location.belowbar, color.new(color.lime,0), size=size.tiny)
+plotshape(showRevLabels and liqBear, "LIQ", shape.circle, location.abovebar, color.new(color.red,0), size=size.tiny)
+plotshape(not showRevLabels and liqBull, "sweep dot", shape.xcross, location.belowbar, color.new(color.green, 80), size=size.tiny)
+plotshape(not showRevLabels and liqBear, "sweep dot", shape.xcross, location.abovebar, color.new(color.red, 80), size=size.tiny)
