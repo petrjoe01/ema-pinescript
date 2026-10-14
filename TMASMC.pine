@@ -1,0 +1,151 @@
+
+//@version=6
+// Original TMA Bands concept: Daveatt
+// Updated to Pine Script v6 + Smart Money Concepts
+indicator("TMA Bands + SMC", shorttitle="TMA + SMC", overlay=true, max_lines_count=200, max_labels_count=200, max_boxes_count=100)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// TMA BANDS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+tmaPeriodBack = input.int(35, "TMA Number of Bars Back", minval=1, group="TMA Bands")
+atrPeriodBack = input.int(75, "ATR Number of Bars Back", minval=1, group="TMA Bands")
+atrMultiplier = input.float(4.0, "ATR Multiplier", minval=0.1, step=0.1, group="TMA Bands")
+src = input.source(close, "Price Source", group="TMA Bands")
+
+ssi = ta.wma(src, tmaPeriodBack)
+tma = ta.swma(ssi)
+atrRange = ta.atr(atrPeriodBack) * atrMultiplier
+
+tmah = tma + atrRange
+tmal = tma - atrRange
+
+plot(tmah, "Upper TMA", color=color.new(color.purple, 40), linewidth=2)
+plot(tma, "Middle TMA", color=color.new(color.maroon, 40), linewidth=2)
+plot(tmal, "Lower TMA", color=color.new(color.purple, 40), linewidth=2)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SMART MONEY CONCEPTS SETTINGS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+swingLength = input.int(5, "Swing Pivot Length", minval=1, group="SMC Structure")
+showBOS = input.bool(true, "Show BOS", group="SMC Structure")
+showCHoCH = input.bool(true, "Show CHoCH", group="SMC Structure")
+showSwingLabels = input.bool(true, "Show Swing High/Low", group="SMC Structure")
+showOrderBlocks = input.bool(true, "Show Order Blocks", group="SMC Order Blocks")
+obLookback = input.int(20, "Order Block Search Bars", minval=1, maxval=100, group="SMC Order Blocks")
+obExtend = input.int(30, "Order Block Extension", minval=1, maxval=500, group="SMC Order Blocks")
+
+bullColor = input.color(color.lime, "Bullish Color", group="SMC Display")
+bearColor = input.color(color.red, "Bearish Color", group="SMC Display")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CONFIRMED SWING POINTS
+// Pivots are confirmed swingLength bars later.
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+pivotHigh = ta.pivothigh(high, swingLength, swingLength)
+pivotLow = ta.pivotlow(low, swingLength, swingLength)
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var int lastSwingHighBar = na
+var int lastSwingLowBar = na
+
+if not na(pivotHigh)
+    lastSwingHigh := pivotHigh
+    lastSwingHighBar := bar_index - swingLength
+    if showSwingLabels
+        label.new(lastSwingHighBar, lastSwingHigh, "SH", style=label.style_label_down, color=color.new(bearColor, 20), textcolor=color.white, size=size.tiny)
+
+if not na(pivotLow)
+    lastSwingLow := pivotLow
+    lastSwingLowBar := bar_index - swingLength
+    if showSwingLabels
+        label.new(lastSwingLowBar, lastSwingLow, "SL", style=label.style_label_up, color=color.new(bullColor, 20), textcolor=color.white, size=size.tiny)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// BOS AND CHoCH
+// A close beyond a stored swing level triggers structure.
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var int marketTrend = 0
+var int brokenHighBar = na
+var int brokenLowBar = na
+
+bullBreak = not na(lastSwingHigh) and close > lastSwingHigh and (na(brokenHighBar) or lastSwingHighBar != brokenHighBar)
+bearBreak = not na(lastSwingLow) and close < lastSwingLow and (na(brokenLowBar) or lastSwingLowBar != brokenLowBar)
+
+bullCHoCH = bullBreak and marketTrend == -1
+bearCHoCH = bearBreak and marketTrend == 1
+bullBOS = bullBreak and marketTrend != -1
+bearBOS = bearBreak and marketTrend != 1
+
+if bullBreak
+    brokenHighBar := lastSwingHighBar
+    if showCHoCH and bullCHoCH
+        label.new(bar_index, low, "Bullish CHoCH", style=label.style_label_up, color=bullColor, textcolor=color.black, size=size.small)
+    else if showBOS and bullBOS
+        label.new(bar_index, low, "Bullish BOS", style=label.style_label_up, color=bullColor, textcolor=color.black, size=size.small)
+    marketTrend := 1
+
+if bearBreak
+    brokenLowBar := lastSwingLowBar
+    if showCHoCH and bearCHoCH
+        label.new(bar_index, high, "Bearish CHoCH", style=label.style_label_down, color=bearColor, textcolor=color.white, size=size.small)
+    else if showBOS and bearBOS
+        label.new(bar_index, high, "Bearish BOS", style=label.style_label_down, color=bearColor, textcolor=color.white, size=size.small)
+    marketTrend := -1
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// BASIC ORDER BLOCK DETECTION
+// Bullish: last bearish candle before bullish break.
+// Bearish: last bullish candle before bearish break.
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var box[] bullishBlocks = array.new_box()
+var box[] bearishBlocks = array.new_box()
+
+if showOrderBlocks and bullBreak
+    int foundBull = na
+    for i = 1 to obLookback
+        if close[i] < open[i] and na(foundBull)
+            foundBull := i
+    if not na(foundBull)
+        box newBull = box.new(left=bar_index - foundBull, top=high[foundBull], right=bar_index + obExtend, bottom=low[foundBull], bgcolor=color.new(bullColor, 85), border_color=color.new(bullColor, 35))
+        array.push(bullishBlocks, newBull)
+        if array.size(bullishBlocks) > 20
+            box.delete(array.shift(bullishBlocks))
+
+if showOrderBlocks and bearBreak
+    int foundBear = na
+    for i = 1 to obLookback
+        if close[i] > open[i] and na(foundBear)
+            foundBear := i
+    if not na(foundBear)
+        box newBear = box.new(left=bar_index - foundBear, top=high[foundBear], right=bar_index + obExtend, bottom=low[foundBear], bgcolor=color.new(bearColor, 85), border_color=color.new(bearColor, 35))
+        array.push(bearishBlocks, newBear)
+        if array.size(bearishBlocks) > 20
+            box.delete(array.shift(bearishBlocks))
+
+// Extend active order blocks and remove invalidated blocks.
+if array.size(bullishBlocks) > 0
+    for i = array.size(bullishBlocks) - 1 to 0
+        box b = array.get(bullishBlocks, i)
+        box.set_right(b, bar_index + obExtend)
+        if close < box.get_bottom(b)
+            box.delete(b)
+            array.remove(bullishBlocks, i)
+
+if array.size(bearishBlocks) > 0
+    for i = array.size(bearishBlocks) - 1 to 0
+        box b = array.get(bearishBlocks, i)
+        box.set_right(b, bar_index + obExtend)
+        if close > box.get_top(b)
+            box.delete(b)
+            array.remove(bearishBlocks, i)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ALERTS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+alertcondition(bullBOS, "Bullish BOS", "Bullish break of structure")
+alertcondition(bearBOS, "Bearish BOS", "Bearish break of structure")
+alertcondition(bullCHoCH, "Bullish CHoCH", "Bullish change of character")
+alertcondition(bearCHoCH, "Bearish CHoCH", "Bearish change of character")
+alertcondition(close > tmah, "Price Above Upper TMA", "Price closed above upper TMA band")
+alertcondition(close < tmal, "Price Below Lower TMA", "Price closed below lower TMA band")
