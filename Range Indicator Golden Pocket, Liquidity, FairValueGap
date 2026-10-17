@@ -1,0 +1,204 @@
+//@version=5
+indicator("Range Indicator Golden Pocket, Liquidity, FairValueGaps, TrendReversal", overlay=true, max_lines_count=500, max_boxes_count=500)
+
+// --- 1. SETTINGS: RANGE & GP ---
+i_boxColor      = input.color(color.new(#787b86, 92), "Range Background", group="Range Visuals")
+i_gpBullishColor  = input.color(color.new(#4caf50, 60), "Bullish GP Color", group="Range Visuals")
+i_gpBearishColor  = input.color(color.new(#f44336, 60), "Bearish GP Color", group="Range Visuals")
+i_liqColor        = input.color(color.new(#ffeb3b, 85), "Liquidity Zones Color", group="Range Visuals")
+i_lineColor       = input.color(color.white, "Boundary Line Color", group="Range Visuals")
+i_whiteText       = color.white
+
+i_autoFit         = input.bool(true, "Auto-Fit Box to last high and low", group="Range Settings")
+i_dynamicExpand   = input.bool(false, "Enable Dynamic Expansion", group="Range Settings")
+i_lookback        = input.int(100, "Lookback Period (max. 300)", minval=2, maxval=300, group="Range Settings")
+i_offsetR         = input.int(50, "Box Offset Right", minval=0, group="Range Settings")
+
+// FVG Settings
+i_showFVG         = input.bool(true, "Show Fair Value Gaps (FVG)", group="FVG Settings")
+i_fvgLen          = input.int(10, "FVG Extension (Bars)", minval=1, group="FVG Settings")
+i_bullFVGColor    = input.color(color.new(#4caf50, 80), "Bullish FVG Color", group="FVG Settings")
+i_bearFVGColor    = input.color(color.new(#f44336, 80), "Bearish FVG Color", group="FVG Settings")
+i_showLabels      = input.bool(true, "Show Price Lines & Labels", group="Range Visuals")
+
+// --- 2. SETTINGS: TREND RIBBON ---
+g_trend = "Trend Ribbon Settings"
+i_showTrend     = input.bool(false, "Enable Trend Ribbon", group=g_trend)
+i_maType        = input.string('EMA', 'MA Type', ['ALMA','HMA','SMA','SWMA','VWMA','WMA','ZLEMA','EMA'], group=g_trend)
+i_maPeriod      = input.int(9, 'MA Period (Length)', 1, group=g_trend)
+i_almaOffset    = input.float(0.85, 'ALMA Shift', 0, 1, 0.05, group=g_trend)
+i_almaSigma     = input.int(6, 'ALMA Deviation', 1, group=g_trend)
+
+i_showCloseLine = input.bool(true, 'Show Trend Close Line', group=g_trend)
+i_showHiLoLines = input.bool(false, 'Show Trend High/Low Lines', group=g_trend)
+i_showTrendFill = input.bool(true, 'Show Trend Cloud Fill', group=g_trend)
+
+i_trendBull     = input.color(color.new(#26A69A, 0), 'Trend Bullish Color', group=g_trend)
+i_trendBear     = input.color(color.new(#EF5350, 0), 'Trend Bearish Color', group=g_trend)
+i_trendNeut     = input.color(color.new(#808080, 0), 'Trend Neutral Color', group=g_trend)
+
+// --- 3. DIVERGENCE CALCULATIONS ---
+rsiVal = ta.rsi(close, 14)
+[macdLine, _, _] = ta.macd(close, 12, 26, 9)
+p_lb = 5
+pl = ta.pivotlow(low, p_lb, p_lb)
+ph = ta.pivothigh(high, p_lb, p_lb)
+
+rsiBull  = not na(pl) and rsiVal[p_lb] > ta.valuewhen(not na(pl), rsiVal[p_lb], 1) and low[p_lb] < ta.valuewhen(not na(pl), low[p_lb], 1)
+macdBull = not na(pl) and macdLine[p_lb] > ta.valuewhen(not na(pl), macdLine[p_lb], 1) and low[p_lb] < ta.valuewhen(not na(pl), low[p_lb], 1)
+rsiBear  = not na(ph) and rsiVal[p_lb] < ta.valuewhen(not na(ph), rsiVal[p_lb], 1) and high[p_lb] > ta.valuewhen(not na(ph), high[p_lb], 1)
+macdBear = not na(ph) and macdLine[p_lb] < ta.valuewhen(not na(ph), macdLine[p_lb], 1) and high[p_lb] > ta.valuewhen(not na(ph), high[p_lb], 1)
+
+string statusText = "LIQUIDITY"
+if (rsiBull or macdBull)
+    statusText := "LIQUIDITY | BULL DIV: " + (rsiBull ? "RSI " : "") + (macdBull ? "MACD" : "")
+else if (rsiBear or macdBear)
+    statusText := "LIQUIDITY | BEAR DIV: " + (rsiBear ? "RSI " : "") + (macdBear ? "MACD" : "")
+
+// --- 4. FIXED LOGIC: RANGE & GP ---
+float windowHigh = ta.highest(high, i_lookback)
+float windowLow  = ta.lowest(low, i_lookback)
+
+var float rHigh = na
+var float rLow  = na
+
+if barstate.islast
+    if i_dynamicExpand
+        rHigh := windowHigh
+        rLow  := windowLow
+    else
+        rHigh := high[i_lookback] > windowHigh ? high[i_lookback] : windowHigh
+        rLow  := low[i_lookback] < windowLow ? low[i_lookback] : windowLow
+
+int hOffLookback = ta.highestbars(high, i_lookback)
+int lOffLookback = ta.lowestbars(low, i_lookback)
+int anchorBar = i_autoFit ? math.min(bar_index + hOffLookback, bar_index + lOffLookback) : (bar_index - i_lookback)
+
+float rDiff = rHigh - rLow
+float bUp = rLow + (rDiff * 0.382), bLo = rLow + (rDiff * 0.35)
+float sUp = rHigh - (rDiff * 0.35), sLo = rHigh - (rDiff * 0.382)
+
+// --- 5. CALCULATIONS: TREND RIBBON ---
+f_ma(x, type, len, off, sig) =>
+    switch type
+        'ALMA'  => ta.alma(x, len, off, sig)
+        'HMA'   => ta.hma(x, len)
+        'SMA'   => ta.sma(x, len)
+        'SWMA'  => ta.swma(x)
+        'VWMA'  => ta.vwma(x, len)
+        'WMA'   => ta.wma(x, len)
+        'ZLEMA' => ta.ema(x + x - x[math.floor((len - 1) / 2)], len)
+        => ta.ema(x, len)
+
+haTicker = ticker.heikinashi(syminfo.tickerid)
+haOpen   = request.security(haTicker, timeframe.period, open)
+haClose  = request.security(haTicker, timeframe.period, close)
+haHigh   = request.security(haTicker, timeframe.period, high)
+haLow    = request.security(haTicker, timeframe.period, low)
+
+ma_ha_open  = f_ma(haOpen, i_maType, i_maPeriod, i_almaOffset, i_almaSigma)
+ma_ha_close = f_ma(haClose, i_maType, i_maPeriod, i_almaOffset, i_almaSigma)
+ma_ha_high  = f_ma(haHigh, i_maType, i_maPeriod, i_almaOffset, i_almaSigma)
+ma_ha_low   = f_ma(haLow, i_maType, i_maPeriod, i_almaOffset, i_almaSigma)
+
+trend_val = 100 * (ma_ha_close - ma_ha_open) / (ma_ha_high - ma_ha_low)
+color_trend = trend_val > 0 ? i_trendBull : i_trendBear
+trend_bullish = trend_val > 0
+trend_flip_bull = trend_bullish and not trend_bullish[1]
+trend_flip_bear = not trend_bullish and trend_bullish[1]
+
+// --- 6. FVG LOGIC ---
+if i_showFVG
+    if low > high[2]
+        box.new(bar_index[1], low, bar_index + i_fvgLen, high[2], bgcolor=i_bullFVGColor, border_color=na)
+    if high < low[2]
+        box.new(bar_index[1], high, bar_index + i_fvgLen, low[2], bgcolor=i_bearFVGColor, border_color=na)
+
+// --- 7. VISUALS: RANGE & LABELS ---
+var box b_Range   = box.new(na, na, na, na, xloc=xloc.bar_index, bgcolor=i_boxColor, border_color=color.gray)
+var box b_Bullish = box.new(na, na, na, na, xloc=xloc.bar_index, bgcolor=i_gpBullishColor, border_color=na, text="BULLISH Golden Pocket ↑", text_color=color.white, text_size=size.small)
+var box b_Bearish = box.new(na, na, na, na, xloc=xloc.bar_index, bgcolor=i_gpBearishColor, border_color=na, text="BEARISH Golden Pocket ↓", text_color=color.white, text_size=size.small)
+var box b_LiqTop  = box.new(na, na, na, na, xloc=xloc.bar_index, bgcolor=i_liqColor, border_color=na, text="LIQUIDITY", text_color=i_whiteText, text_size=size.tiny)
+var box b_LiqBot  = box.new(na, na, na, na, xloc=xloc.bar_index, bgcolor=i_liqColor, border_color=na, text="LIQUIDITY", text_color=i_whiteText, text_size=size.tiny)
+
+var line[] l_levels = array.new_line()
+var label[] lb_prices = array.new_label()
+
+if barstate.isfirst
+    for i = 0 to 7
+        array.push(l_levels, line.new(na, na, na, na, xloc=xloc.bar_index, color=i_lineColor))
+        array.push(lb_prices, label.new(na, na, "", xloc=xloc.bar_index, color=color.new(color.black, 100), textcolor=i_lineColor, size=size.small, style=label.style_label_left))
+
+if barstate.islast
+    int rightBar = bar_index + i_offsetR
+    box.set_lefttop(b_Range, anchorBar, rHigh), box.set_rightbottom(b_Range, rightBar, rLow)
+    box.set_lefttop(b_Bullish, anchorBar, bUp), box.set_rightbottom(b_Bullish, rightBar, bLo)
+    box.set_lefttop(b_Bearish, anchorBar, sUp), box.set_rightbottom(b_Bearish, rightBar, sLo)
+    box.set_lefttop(b_LiqTop, anchorBar, rHigh), box.set_rightbottom(b_LiqTop, rightBar, rHigh - (rDiff * 0.05))
+    box.set_lefttop(b_LiqBot, anchorBar, rLow + (rDiff * 0.05)), box.set_rightbottom(b_LiqBot, rightBar, rLow)
+    box.set_text(b_LiqBot, statusText)
+
+    if i_showLabels
+        float[] p_vals = array.from(rHigh, rHigh - (rDiff * 0.05), sUp, sLo, bUp, bLo, rLow + (rDiff * 0.05), rLow)
+        for i = 0 to 7
+            float v = array.get(p_vals, i)
+            line.set_xy1(array.get(l_levels, i), anchorBar, v)
+            line.set_xy2(array.get(l_levels, i), rightBar, v)
+            label.set_xy(array.get(lb_prices, i), rightBar, v)
+            label.set_text(array.get(lb_prices, i), " " + str.tostring(v, format.mintick))
+
+// --- 8. VISUALS: TREND RIBBON PLOTS ---
+plot_open    = plot(i_showTrend ? ma_ha_open : na, 'Trend Open', na)
+plot_close   = plot(i_showTrend ? ma_ha_close : na, 'Trend Close', i_showCloseLine ? color_trend : na, 2)
+plot_high    = plot(i_showTrend ? ma_ha_high : na, 'Trend High', i_showHiLoLines ? i_trendNeut : na)
+plot_low     = plot(i_showTrend ? ma_ha_low : na, 'Trend Low', i_showHiLoLines ? i_trendNeut : na)
+
+plot_body_h  = plot(i_showTrend ? math.max(ma_ha_open, ma_ha_close) : na, 'Body High', na)
+plot_body_l  = plot(i_showTrend ? math.min(ma_ha_open, ma_ha_close) : na, 'Body Low', na)
+
+fill(plot_open, plot_close, i_showTrend and i_showTrendFill ? color.new(color_trend, 50) : na, 'Main Ribbon Fill')
+fill(plot_high, plot_body_h, i_showTrend and i_showTrendFill ? color.new(i_trendNeut, 87) : na, 'Upper Wick Fill')
+fill(plot_body_l, plot_low, i_showTrend and i_showTrendFill ? color.new(i_trendNeut, 87) : na, 'Lower Wick Fill')
+
+// --- 9. SIGNAL LOGIC & ALERTS ---
+bool sfpShort = high > rHigh and close < rHigh
+bool sfpLong  = low < rLow and close > rLow
+
+var bool tBear = false
+var bool tBull = false
+if high >= sLo and low <= sUp
+    tBear := true
+if low <= bUp and high >= bLo
+    tBull := true
+
+bool pL = (close[2] < open[2]) and (close[1] > open[1]) and (close > high[1])
+bool pS = (close[2] > open[2]) and (close[1] < open[1]) and (close < low[1])
+
+bool signalLongOnly  = tBull and pL
+bool signalShortOnly = tBear and pS
+
+if (signalShortOnly or (tBear and high > rHigh))
+    tBear := false
+if (signalLongOnly or (tBull and low < rLow))
+    tBull := false
+
+alertcondition(ta.crossover(high, sLo) or ta.crossunder(low, bUp), "GP Touch", "Price entered Golden Pocket.")
+alertcondition(signalLongOnly, "Long Pattern Confirmed", "Long confirmed in BULLISH GP.")
+alertcondition(signalShortOnly, "Short Pattern Confirmed", "Short confirmed in BEARISH GP.")
+alertcondition(sfpLong, "SFP Long (Liquidity Grab)", "SFP: Liquidity grab below Low.")
+alertcondition(sfpShort, "SFP Short (Liquidity Grab)", "SFP: Liquidity grab above High.")
+
+// --- 10. NEW ALERT CONDITIONS ---
+alertcondition(ta.cross(close, ma_ha_close), "Cross: Price & Trend Line", "Price has crossed the Trend Signal Line")
+alertcondition(ta.crossover(high, rHigh - (rDiff * 0.05)), "Cross: Enter Upper Liquidity", "Price entered Upper Liquidity Zone")
+alertcondition(ta.crossunder(low, rLow + (rDiff * 0.05)), "Cross: Enter Lower Liquidity", "Price entered Lower Liquidity Zone")
+alertcondition(ta.crossunder(low, bUp) and close[1] > bUp, "Cross: Enter Bullish GP", "Price entered Bullish GP from above")
+alertcondition(ta.crossover(high, sLo) and close[1] < sLo, "Cross: Enter Bearish GP", "Price entered Bearish GP from below")
+alertcondition(trend_flip_bull, "Trend: Bullish Flip", "Trend Ribbon flipped BULLISH")
+alertcondition(trend_flip_bear, "Trend: Bearish Flip", "Trend Ribbon flipped BEARISH")
+alertcondition(rsiBull, "Div: RSI Bullish", "RSI Bullish Divergence detected")
+alertcondition(rsiBear, "Div: RSI Bearish", "RSI Bearish Divergence detected")
+alertcondition(macdBull, "Div: MACD Bullish", "MACD Bullish Divergence detected")
+alertcondition(macdBear, "Div: MACD Bearish", "MACD Bearish Divergence detected")
+alertcondition(rsiBull and macdBull, "Confluence: Both Bullish Div", "RSI & MACD Bullish Divergence detected")
+alertcondition(rsiBear and macdBear, "Confluence: Both Bearish Div", "RSI & MACD Bearish Divergence detected")
